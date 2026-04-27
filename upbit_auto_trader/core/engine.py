@@ -76,6 +76,7 @@ class TradingEngine:
         db_path = root / "database" / "trades.db"
         self.rag = RAGMemory(db_path=str(db_path))
         self.notifier = Notifier()
+        self._stop_loss_pct = float(raw["risk"]["stop_loss_pct"])
         self._ai_worker = threading.Thread(target=self._ai_loop, daemon=True)
 
     def run_forever(self) -> None:
@@ -174,6 +175,43 @@ class TradingEngine:
             "created_at": time.time(),
         }
         self.rag.save_trade_memory(memory)
+
+
+    def get_settings_snapshot(self) -> dict[str, Any]:
+        return {
+            "mode": self.config.mode,
+            "max_buy_amount_krw": self.config.max_buy_amount_krw,
+            "max_positions": self.config.max_positions,
+            "min_ai_confidence": self.config.min_ai_confidence,
+            "allow_new_buy_in_bear_market": self.config.allow_new_buy_in_bear_market,
+            "stop_loss_pct": getattr(self, "_stop_loss_pct", -2.5),
+        }
+
+    def update_settings(self, payload: dict[str, Any]) -> None:
+        with self._config_path.open("r", encoding="utf-8") as fp:
+            raw = yaml.safe_load(fp)
+
+        raw["app"]["mode"] = payload["mode"]
+        raw["trading"]["max_buy_amount_krw"] = float(payload["max_buy_amount_krw"])
+        raw["trading"]["max_positions"] = int(payload["max_positions"])
+        raw["trading"]["allow_new_buy_in_bear_market"] = bool(payload["allow_new_buy_in_bear_market"])
+        raw["ai"]["min_confidence"] = int(payload["min_ai_confidence"])
+        raw["risk"]["stop_loss_pct"] = float(payload["stop_loss_pct"])
+
+        with self._config_path.open("w", encoding="utf-8") as fp:
+            yaml.safe_dump(raw, fp, sort_keys=False, allow_unicode=True)
+
+        self.config.mode = raw["app"]["mode"]
+        self.config.max_buy_amount_krw = float(raw["trading"]["max_buy_amount_krw"])
+        self.config.max_positions = int(raw["trading"]["max_positions"])
+        self.config.min_ai_confidence = int(raw["ai"]["min_confidence"])
+        self.config.allow_new_buy_in_bear_market = bool(raw["trading"]["allow_new_buy_in_bear_market"])
+        self._stop_loss_pct = float(raw["risk"]["stop_loss_pct"])
+
+        self.risk.max_buy_amount_krw = self.config.max_buy_amount_krw
+        self.risk.max_positions = self.config.max_positions
+        self.upbit.mode = self.config.mode
+        self.log("Settings updated from UI")
 
     def stop(self) -> None:
         self._stop_event.set()
