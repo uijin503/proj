@@ -6,7 +6,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QListWidget,
-    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -24,8 +23,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Upbit AI Auto Trader")
         self.resize(1440, 900)
         self._build_ui()
+
         self._timer = QTimer(self)
-        self._timer.timeout.connect(self._flush_logs)
+        self._timer.timeout.connect(self._refresh)
         self._timer.start(500)
 
     def _build_ui(self) -> None:
@@ -54,14 +54,18 @@ class MainWindow(QMainWindow):
         card = QFrame()
         card.setObjectName("Card")
         card_layout = QVBoxLayout(card)
-        card_layout.addWidget(QLabel("총 자산"))
-        total = QLabel("₩ 0")
-        total.setObjectName("Accent")
-        card_layout.addWidget(total)
-        card_layout.addWidget(QLabel("오늘 손익"))
-        pnl = QLabel("+0.00%")
-        pnl.setObjectName("Profit")
-        card_layout.addWidget(pnl)
+        card_layout.addWidget(QLabel("자동매매 상태"))
+
+        self.mode_label = QLabel("MODE: -")
+        self.mode_label.setObjectName("Accent")
+        card_layout.addWidget(self.mode_label)
+
+        self.position_label = QLabel("보유 포지션: 0")
+        card_layout.addWidget(self.position_label)
+
+        self.pnl_label = QLabel("오늘 손익: 0.00%")
+        self.pnl_label.setObjectName("Profit")
+        card_layout.addWidget(self.pnl_label)
 
         emergency = QPushButton("🛑 긴급 정지")
         emergency.setObjectName("EmergencyStop")
@@ -77,12 +81,27 @@ class MainWindow(QMainWindow):
         layout.addWidget(sidebar)
         layout.addLayout(main_col)
 
+    def _refresh(self) -> None:
+        self._flush_logs()
+        status = self.engine.get_status()
+        self.mode_label.setText(f"MODE: {status['mode']}")
+        self.position_label.setText(f"보유 포지션: {status['positions']}")
+        self.pnl_label.setText(f"오늘 손익: {status['daily_pnl_pct']:.2f}%")
+
     def _flush_logs(self) -> None:
         logs = self.engine.drain_logs()
         if not logs:
             return
-        for line in logs[-1000:]:
+        for line in logs[-200:]:
             self.logs.append(line)
+
+        doc = self.logs.document()
+        while doc.blockCount() > 1000:
+            cursor = self.logs.textCursor()
+            cursor.movePosition(cursor.Start)
+            cursor.select(cursor.BlockUnderCursor)
+            cursor.removeSelectedText()
+            cursor.deleteChar()
 
     def _confirm_emergency_stop(self) -> None:
         reply = QMessageBox.question(

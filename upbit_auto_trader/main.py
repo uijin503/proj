@@ -1,7 +1,12 @@
 import logging
 import sys
+from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
+
+BASE_DIR = Path(__file__).resolve().parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
 from app.ui.main_window import MainWindow
 from core.engine import TradingEngine

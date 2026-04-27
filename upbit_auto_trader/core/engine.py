@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import gc
 import json
 import logging
@@ -8,6 +7,8 @@ import queue
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -25,90 +26,171 @@ LOGGER = logging.getLogger(__name__)
 
 @dataclass
 class EngineConfig:
-    max_ui_log_rows: int = 1000
-    max_chart_points: int = 1000
+    project_root: Path
+    max_ui_log_rows: int
+    max_chart_points: int
+    mode: str
+    min_ai_confidence: int
+    strong_buy_confidence: int
+    max_buy_amount_krw: float
+    max_positions: int
+    allow_new_buy_in_bear_market: bool
 
 
 class TradingEngine:
-    def __init__(self, config_path: str = "config.yaml"):
+    def __init__(self, config_path: str | None = None):
         self._stop_event = threading.Event()
         self._log_queue: queue.Queue[str] = queue.Queue(maxsize=1000)
+        self._positions: dict[str, dict[str, float]] = {}
+        self._ai_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=500)
 
-        with open(config_path, "r", encoding="utf-8") as fp:
+        default_config = Path(__file__).resolve().parents[1] / "config.yaml"
+        self._config_path = Path(config_path) if config_path else default_config
+
+        with self._config_path.open("r", encoding="utf-8") as fp:
             raw = yaml.safe_load(fp)
 
+        root = self._config_path.parent
         self.config = EngineConfig(
-            max_ui_log_rows=raw["system"]["max_ui_log_rows"],
-            max_chart_points=raw["system"]["max_chart_points"],
+            project_root=root,
+            max_ui_log_rows=int(raw["system"]["max_ui_log_rows"]),
+            max_chart_points=int(raw["system"]["max_chart_points"]),
+            mode=str(raw["app"]["mode"]),
+            min_ai_confidence=int(raw["ai"]["min_confidence"]),
+            strong_buy_confidence=int(raw["ai"]["strong_buy_confidence"]),
+            max_buy_amount_krw=float(raw["trading"]["max_buy_amount_krw"]),
+            max_positions=int(raw["trading"]["max_positions"]),
+            allow_new_buy_in_bear_market=bool(raw["trading"].get("allow_new_buy_in_bear_market", False)),
         )
         self.bucket = TokenBucket(capacity=8, refill_rate_per_sec=8)
         self.regime = MarketRegimeDetector()
         self.risk = RiskManager(
-            max_buy_amount_krw=raw["trading"]["max_buy_amount_krw"],
-            max_positions=raw["trading"]["max_positions"],
-            daily_loss_limit_pct=raw["trading"]["daily_loss_limit_pct"],
-            max_consecutive_losses=raw["trading"]["max_consecutive_losses"],
+            max_buy_amount_krw=self.config.max_buy_amount_krw,
+            max_positions=self.config.max_positions,
+            daily_loss_limit_pct=float(raw["trading"]["daily_loss_limit_pct"]),
+            max_consecutive_losses=int(raw["trading"]["max_consecutive_losses"]),
         )
-        self.upbit = UpbitClient(token_bucket=self.bucket)
+        self.upbit = UpbitClient(token_bucket=self.bucket, mode=self.config.mode)
         self.feed = WebSocketFeed()
         self.ai = GeminiClient(model_name=raw["ai"]["model_name"])
-        self.rag = RAGMemory(db_path="database/trades.db")
+        db_path = root / "database" / "trades.db"
+        self.rag = RAGMemory(db_path=str(db_path))
         self.notifier = Notifier()
-        self.ai_queue: queue.Queue[dict] = queue.Queue(maxsize=500)
         self._ai_worker = threading.Thread(target=self._ai_loop, daemon=True)
 
     def run_forever(self) -> None:
         LOGGER.info("TradingEngine started")
+        self.log(f"Engine mode={self.config.mode}")
         self._ai_worker.start()
+
         while not self._stop_event.is_set():
             try:
                 tick = self.feed.get_next_tick(timeout=1.0)
                 if not tick:
                     continue
 
-                regime = self.regime.update(tick.get("btc_price", 0.0))
-                if regime == "BEAR":
-                    self.log("BEAR market detected: new buys disabled")
+                regime = self.regime.update(float(tick.get("btc_price", 0.0)))
+                if regime == "BEAR" and not self.config.allow_new_buy_in_bear_market:
+                    self.log("BEAR market detected: new buys blocked")
 
                 candidate = self._build_candidate(tick, regime)
-                self.ai_queue.put_nowait(candidate)
+                if self._score_candidate(candidate) >= 80:
+                    self._ai_queue.put_nowait(candidate)
+
                 self._trim_memory()
             except queue.Full:
-                self.log("AI queue full, skipping candidate")
-            except Exception as exc:  # 안정성 우선
+                self.log("AI queue full, dropped candidate")
+            except Exception as exc:
                 LOGGER.exception("Engine loop error: %s", exc)
                 self.log(f"Engine recovered from error: {exc}")
                 time.sleep(1)
 
+    def _score_candidate(self, candidate: dict[str, Any]) -> int:
+        score = 0
+        if candidate["volume"] > 2.0:
+            score += 20
+        if candidate["change_pct"] > 0.15:
+            score += 20
+        if candidate["regime"] == "BULL":
+            score += 20
+        if -1.0 <= candidate["kimp"] <= 6.0:
+            score += 20
+        if 45 <= candidate["btc_dominance"] <= 60:
+            score += 20
+        return score
+
     def _ai_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
-                candidate = self.ai_queue.get(timeout=1)
-                decision = self.ai.analyze_candidate(candidate, self.rag.search_similar(candidate))
-                payload = json.loads(decision)
-                self.log(f"AI decision={payload['decision']} score={payload['confidence_score']}")
+                candidate = self._ai_queue.get(timeout=1)
+                can_open, reason = self.risk.can_open_position(
+                    current_positions=len(self._positions),
+                    order_amount_krw=self.config.max_buy_amount_krw,
+                )
+                if not can_open:
+                    self.log(f"Risk blocked buy: {reason}")
+                    continue
+
+                if candidate["regime"] == "BEAR" and not self.config.allow_new_buy_in_bear_market:
+                    continue
+
+                ai_raw = self.ai.analyze_candidate(candidate, self.rag.search_similar(candidate))
+                decision = self._safe_parse_ai(ai_raw)
+                confidence = int(decision.get("confidence_score", 0))
+
+                if decision.get("decision") == "BUY" and confidence >= self.config.min_ai_confidence:
+                    self._open_position(candidate)
+                    self.log(f"BUY {candidate['symbol']} / AI={confidence}")
+                else:
+                    self.log(f"HOLD {candidate['symbol']} / AI={confidence}")
             except queue.Empty:
                 continue
             except Exception as exc:
                 self.log(f"AI worker recovered from error: {exc}")
 
-    def _build_candidate(self, tick: dict, regime: str) -> dict:
-        return {
-            "symbol": tick.get("symbol", "KRW-BTC"),
-            "price": tick.get("price", 0.0),
-            "volume": tick.get("volume", 0.0),
-            "regime": regime,
-            "kimp": tick.get("kimp", 0.0),
-            "btc_dominance": tick.get("btc_dominance", 0.0),
+    def _safe_parse_ai(self, ai_raw: str) -> dict[str, Any]:
+        try:
+            return json.loads(ai_raw)
+        except Exception:
+            return {
+                "decision": "HOLD",
+                "confidence_score": 0,
+                "reason": f"invalid ai response: {ai_raw[:80]}",
+                "recommended_stop_loss": -2.5,
+            }
+
+    def _open_position(self, candidate: dict[str, Any]) -> None:
+        symbol = candidate["symbol"]
+        if symbol in self._positions:
+            return
+        price = float(candidate["price"])
+        qty = self.config.max_buy_amount_krw / price if price > 0 else 0
+        self._positions[symbol] = {"avg_price": price, "qty": qty}
+        memory = {
+            "symbol": symbol,
+            "decision": "BUY",
+            "pnl_pct": 0.0,
+            "reason": "score+risk+ai passed",
+            "created_at": time.time(),
         }
+        self.rag.save_trade_memory(memory)
 
     def stop(self) -> None:
         self._stop_event.set()
 
     def emergency_stop(self) -> None:
         self.risk.trigger_emergency_stop()
-        self.log("EMERGENCY STOP: selling all positions and locking new orders")
+        self.log("EMERGENCY STOP: force liquidating all positions")
+        self._positions.clear()
         self.upbit.sell_all_market()
+
+    def get_status(self) -> dict[str, Any]:
+        return {
+            "mode": self.config.mode,
+            "positions": len(self._positions),
+            "emergency": self.risk.state.emergency_stop,
+            "daily_pnl_pct": self.risk.state.daily_pnl_pct,
+        }
 
     def log(self, message: str) -> None:
         try:
@@ -123,8 +205,19 @@ class TradingEngine:
             items.append(self._log_queue.get_nowait())
         return items
 
+    def _build_candidate(self, tick: dict[str, Any], regime: str) -> dict[str, Any]:
+        return {
+            "symbol": tick.get("symbol", "KRW-BTC"),
+            "price": float(tick.get("price", 0.0)),
+            "volume": float(tick.get("volume", 0.0)),
+            "change_pct": float(tick.get("change_pct", 0.0)),
+            "regime": regime,
+            "kimp": float(tick.get("kimp", 0.0)),
+            "btc_dominance": float(tick.get("btc_dominance", 0.0)),
+        }
+
     def _trim_memory(self) -> None:
-        if self.ai_queue.qsize() > self.config.max_ui_log_rows:
-            while self.ai_queue.qsize() > self.config.max_ui_log_rows:
-                self.ai_queue.get_nowait()
+        if self._ai_queue.qsize() > self.config.max_ui_log_rows:
+            while self._ai_queue.qsize() > self.config.max_ui_log_rows:
+                self._ai_queue.get_nowait()
         gc.collect()
