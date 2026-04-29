@@ -1,0 +1,31 @@
+app:
+  name: Upbit AI Auto Trader
+  mode: paper
+  timezone: Asia/Seoul
+security:
+  key_salt_b64: ""
+  encrypted_upbit_access_key: ""
+  encrypted_upbit_secret_key: ""
+  encrypted_gemini_api_key: ""
+trading:
+  max_buy_amount_krw: 100000
+  max_positions: 4
+  daily_loss_limit_pct: -3.0
+  max_consecutive_losses: 3
+  allow_new_buy_in_bear_market: false
+risk:
+  take_profit_pct: 2.0
+  stop_loss_pct: -2.5
+  trailing_stop_pct: 1.2
+ai:
+  min_confidence: 80
+  strong_buy_confidence: 90
+  model_name: gemini-1.5-pro
+filters:
+  whitelist: ["KRW-BTC", "KRW-ETH"]
+  blacklist: ["KRW-BTT", "KRW-BSV"]
+  min_24h_volume_krw: 1000000000
+system:
+  max_ui_log_rows: 1000
+  max_chart_points: 1000
+  auto_recover_seconds: 30
