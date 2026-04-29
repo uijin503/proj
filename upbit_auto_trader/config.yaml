@@ -1,0 +1,14 @@
+mode: paper
+risk:
+  max_daily_loss_pct: -3.0
+  max_positions: 3
+  max_buy_amount_krw: 100000
+  consecutive_stop_limit: 3
+trade:
+  fee_rate: 0.001
+  slippage_bps: 10
+ai:
+  model: gemini-1.5-flash
+  timeout_sec: 6
+logging:
+  max_entries: 1000
