@@ -1,0 +1,5 @@
+discord.py>=2.4.0
+SQLAlchemy>=2.0.30
+asyncpg>=0.29.0
+yfinance>=0.2.40
+python-dotenv>=1.0.1
