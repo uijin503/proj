@@ -1,4 +1,6 @@
-from bot.services.market import _resolve_kr_code
+from decimal import Decimal
+
+from bot.services.market import FxQuote, _resolve_kr_code
 
 
 def test_resolve_numeric_code():
@@ -16,3 +18,14 @@ def test_resolve_unknown_returns_none():
 
 def test_resolve_us_ticker_returns_none():
     assert _resolve_kr_code("AAPL") is None
+
+
+def test_fx_quote_change():
+    q = FxQuote(pair="USD/KRW", rate=Decimal("1400"), prev_close=Decimal("1350"))
+    assert q.change == Decimal("50")
+    assert q.change_pct == Decimal("50") / Decimal("1350") * 100
+
+
+def test_fx_quote_change_zero_prev_close():
+    q = FxQuote(pair="USD/KRW", rate=Decimal("1400"), prev_close=Decimal("0"))
+    assert q.change_pct == Decimal("0")

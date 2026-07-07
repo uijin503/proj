@@ -13,7 +13,7 @@ _KR_STOCKS_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "kr_s
 _kr_name_to_code: dict[str, str] = json.loads(_KR_STOCKS_PATH.read_text(encoding="utf-8"))
 
 _FX_CACHE_TTL_SECONDS = 60
-_fx_cache: dict[str, tuple[Decimal, float]] = {}
+_fx_quote_cache: dict[str, tuple["FxQuote", float]] = {}
 
 
 class SymbolNotFoundError(Exception):
@@ -32,6 +32,23 @@ class Quote:
     @property
     def change(self) -> Decimal:
         return self.price - self.prev_close
+
+    @property
+    def change_pct(self) -> Decimal:
+        if self.prev_close == 0:
+            return Decimal("0")
+        return (self.change / self.prev_close) * 100
+
+
+@dataclass(frozen=True)
+class FxQuote:
+    pair: str  # e.g. "USD/KRW"
+    rate: Decimal
+    prev_close: Decimal
+
+    @property
+    def change(self) -> Decimal:
+        return self.rate - self.prev_close
 
     @property
     def change_pct(self) -> Decimal:
@@ -91,20 +108,28 @@ async def get_quote(user_input: str) -> Quote:
     return Quote(yf_symbol, "US", currency, name, price, prev_close)
 
 
-def _fetch_fx_sync(pair: str) -> Decimal:
+def _fetch_fx_sync(pair: str) -> tuple[Decimal, Decimal]:
     ticker = yf.Ticker(pair)
     hist = ticker.history(period="5d", interval="1d")
     if hist.empty:
         raise SymbolNotFoundError(pair)
-    return Decimal(str(hist["Close"].iloc[-1]))
+    rate = Decimal(str(hist["Close"].iloc[-1]))
+    prev_close = Decimal(str(hist["Close"].iloc[-2])) if len(hist) > 1 else rate
+    return rate, prev_close
 
 
-async def get_usdkrw_rate() -> Decimal:
+async def get_usdkrw_quote() -> FxQuote:
     now = time.monotonic()
-    cached = _fx_cache.get("USDKRW")
+    cached = _fx_quote_cache.get("USDKRW")
     if cached and now - cached[1] < _FX_CACHE_TTL_SECONDS:
         return cached[0]
 
-    rate = await asyncio.to_thread(_fetch_fx_sync, "KRW=X")
-    _fx_cache["USDKRW"] = (rate, now)
-    return rate
+    rate, prev_close = await asyncio.to_thread(_fetch_fx_sync, "KRW=X")
+    quote = FxQuote(pair="USD/KRW", rate=rate, prev_close=prev_close)
+    _fx_quote_cache["USDKRW"] = (quote, now)
+    return quote
+
+
+async def get_usdkrw_rate() -> Decimal:
+    quote = await get_usdkrw_quote()
+    return quote.rate

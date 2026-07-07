@@ -38,6 +38,18 @@ class TradingCog(commands.Cog):
             f"({q.change_pct:.2f}%)"
         )
 
+    @app_commands.command(name="환율", description="현재 원/달러 환율을 조회합니다.")
+    async def fx(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        fx_quote = await market.get_usdkrw_quote()
+
+        arrow = "🔺" if fx_quote.change > 0 else ("🔻" if fx_quote.change < 0 else "➖")
+        await interaction.followup.send(
+            f"💱 **{fx_quote.pair}**\n"
+            f"{fx_quote.rate:,.2f}원 {arrow} {abs(fx_quote.change):,.2f} ({fx_quote.change_pct:.2f}%)\n"
+            f"-# 미국 주식 매매 시 이 환율이 적용됩니다."
+        )
+
     @app_commands.command(name="매수", description="주식을 매수합니다.")
     @app_commands.describe(종목="종목코드/티커/종목명", 수량="매수할 수량")
     async def buy(self, interaction: discord.Interaction, 종목: str, 수량: int) -> None:
